@@ -2,13 +2,13 @@
 # Week 3: Data Wrangling and Preprocessing (Data Science With R)
 # Dataset: msleep (ggplot2) - sleep patterns of 83 mammal species, 11 variables
 # Run top to bottom in RStudio, or: Rscript wrangling_msleep.R
-# Packages: install.packages(c("tidyverse", "skimr"))
+# Packages: dplyr and ggplot2 only (plus base R): install.packages(c("dplyr", "ggplot2"))
 # Outputs: data/raw, data/processed, figures/, sessionInfo.txt
 # =====================================================================
 
 # ---- 0. Setup ----------------------------------------------------
-library(tidyverse)   # dplyr, tidyr, ggplot2, readr, stringr, forcats
-library(skimr)       # compact data summaries
+library(dplyr)       # data-wrangling verbs: mutate, filter, summarise, ...
+library(ggplot2)     # plotting (and the msleep dataset)
 
 for (d in c("data/raw", "data/processed", "figures"))
   dir.create(d, recursive = TRUE, showWarnings = FALSE)
@@ -19,19 +19,21 @@ theme_set(theme_minimal(base_size = 12))
 # ---- 1. Import and archive raw data ------------------------------
 data("msleep", package = "ggplot2")
 raw <- msleep                                  # keep an untouched copy
-write_csv(raw, "data/raw/msleep_raw.csv")      # archive the raw data
+write.csv(raw, "data/raw/msleep_raw.csv", row.names = FALSE)   # archive raw data
 
 glimpse(raw)
 dim(raw)
 head(raw, 8)
-skim(raw)
+summary(raw)
 
 # ---- 2.1 Missing values ------------------------------------------
-missing_tbl <- raw |>
-  summarise(across(everything(), ~ sum(is.na(.x)))) |>
-  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
-  mutate(pct_missing = round(100 * n_missing / nrow(raw), 1)) |>
-  arrange(desc(n_missing))
+missing_tbl <- data.frame(
+  variable  = names(raw),
+  n_missing = sapply(raw, function(x) sum(is.na(x))),
+  row.names = NULL
+)
+missing_tbl$pct_missing <- round(100 * missing_tbl$n_missing / nrow(raw), 1)
+missing_tbl <- missing_tbl[order(-missing_tbl$n_missing), ]
 missing_tbl
 
 sum(complete.cases(raw))   # rows that would survive listwise deletion
@@ -84,7 +86,7 @@ fig2
 # ---- 3.1 Fix data types ------------------------------------------
 clean <- raw |>
   mutate(
-    name  = str_squish(name),
+    name  = trimws(gsub("\\s+", " ", name)),   # trim and squeeze spaces
     vore  = factor(vore, levels = c("carni", "herbi", "insecti", "omni"),
                    labels = c("Carnivore", "Herbivore", "Insectivore", "Omnivore")),
     conservation = factor(conservation,
@@ -101,9 +103,12 @@ stopifnot(sum(is.na(clean$vore)) == sum(is.na(raw$vore)),
 
 # ---- 3.2 Handle missing values -----------------------------------
 # (a) Categorical: make missingness an explicit level
+add_level <- function(f, label)
+  factor(ifelse(is.na(f), label, as.character(f)), levels = c(levels(f), label))
+
 clean <- clean |>
-  mutate(vore = fct_na_value_to_level(vore, level = "Unknown"),
-         conservation = fct_na_value_to_level(conservation, level = "Not recorded"))
+  mutate(vore = add_level(vore, "Unknown"),
+         conservation = add_level(conservation, "Not recorded"))
 
 # (b) Flag rows whose numeric values will be imputed
 clean <- clean |>
@@ -125,19 +130,23 @@ clean <- clean |>
   select(-sleep_cycle, -awake)   # >50% missing / redundant (24 - sleep_total)
 
 # ---- 4.1 Feature extraction --------------------------------------
+# Keep the 5 most common taxonomic orders; group the rest as "Other"
+top_orders <- names(sort(table(clean$order), decreasing = TRUE))[1:5]
+
 clean <- clean |>
   mutate(
     log_bodywt  = log10(bodywt),
     log_brainwt = log10(brainwt),
     brain_pct   = 100 * brainwt / bodywt,     # brain mass as % of body mass
     rem_share   = sleep_rem / sleep_total,    # share of sleep spent in REM
-    name_words  = str_count(name, "\\S+"),     # words in the common name
+    name_words  = lengths(strsplit(name, "\\s+")),   # words in the common name
     sleep_pattern = factor(
       case_when(sleep_total < 8  ~ "Short",
                 sleep_total < 14 ~ "Medium",
                 TRUE             ~ "Long"),
       levels = c("Short", "Medium", "Long"), ordered = TRUE),
-    order_grp = fct_lump_n(order, n = 5, other_level = "Other")
+    order_grp = factor(if_else(as.character(order) %in% top_orders,
+                               as.character(order), "Other"))
   )
 
 count(clean, order_grp, sort = TRUE)
@@ -148,14 +157,14 @@ count(clean, sleep_pattern)
 clean <- clean |> mutate(sleep_pattern_ord = as.integer(sleep_pattern))
 
 # One-hot encoding of nominal variables (full dummy set, no reference level)
-onehot <- model.matrix(
+onehot <- as.data.frame(model.matrix(
   ~ vore + order_grp - 1, data = clean,
   contrasts.arg = list(
     vore      = contrasts(clean$vore, contrasts = FALSE),
     order_grp = contrasts(clean$order_grp, contrasts = FALSE))
-) |> as_tibble()
+))
 
-names(onehot) <- names(onehot) |> str_replace_all("[^A-Za-z0-9]+", "_")
+names(onehot) <- gsub("[^A-Za-z0-9]+", "_", names(onehot))
 
 dim(onehot)
 names(onehot)
@@ -195,7 +204,7 @@ stopifnot(
   all(is.finite(final$log_bodywt), is.finite(final$log_brainwt))
 )
 
-comparison <- tibble(
+comparison <- data.frame(
   stage         = c("raw", "final"),
   rows          = c(nrow(raw), nrow(final)),
   columns       = c(ncol(raw), ncol(final)),
@@ -225,7 +234,7 @@ ggsave("figures/w3_fig4_imputation.png", fig4, width = 7, height = 4.5, dpi = 30
 fig4
 
 # ---- 7. Export and session info ----------------------------------
-write_csv(final, "data/processed/msleep_clean.csv")
+write.csv(final, "data/processed/msleep_clean.csv", row.names = FALSE)
 saveRDS(final, "data/processed/msleep_clean.rds")   # preserves factor types
 writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
 sessionInfo()
